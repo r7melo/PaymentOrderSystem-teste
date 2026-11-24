@@ -11,6 +11,23 @@ services:
       timeout: 5s
       retries: 5
 
+  auth_db:
+    image: postgres:16
+    container_name: auth_db
+    environment:
+      POSTGRES_DB: auth
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: auth
+    ports: ["5436:5432"]
+    volumes:
+      - auth_db_data:/var/lib/postgresql/data
+      - ./auth_db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   accounts_db:
     image: postgres:16
     container_name: accounts_db
@@ -63,10 +80,42 @@ services:
       timeout: 5s
       retries: 10
 
+  gateway:
+    build: ./gateway
+    container_name: gateway
+    ports: ["30000:8000"]
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      - JWT_SECRET=super-secret-jwt-key-payment-system
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    volumes:
+      - ./gateway:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  auth_service:
+    build: ./auth_service
+    container_name: auth_service
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - DB_HOST=auth_db
+      - DB_NAME=auth
+      - DB_USER=auth
+      - DB_PASSWORD=auth
+      - JWT_SECRET=super-secret-jwt-key-payment-system
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      auth_db:
+        condition: service_healthy
+    volumes:
+      - ./auth_service:/app
+    command: python -u -m app.main
+
   accounts_service:
     build: ./accounts_service
     container_name: accounts_service
-    ports: ["30003:8003"]
     environment:
       - RABBITMQ_HOST=rabbitmq
       - DB_HOST=accounts_db
@@ -78,13 +127,12 @@ services:
         condition: service_healthy
       accounts_db:
         condition: service_healthy
-    volumes: ["./accounts_service:/app"]
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8003 --reload
+    volumes:
+      - ./accounts_service:/app
 
   orders_service:
     build: ./orders_service
     container_name: orders_service
-    ports: ["30001:8001"]
     environment:
       - RABBITMQ_HOST=rabbitmq
       - DB_HOST=orders_db
@@ -96,13 +144,12 @@ services:
         condition: service_healthy
       orders_db:
         condition: service_healthy
-    volumes: ["./orders_service:/app"]
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8001 --reload
+    volumes:
+      - ./orders_service:/app
 
   confirmation_service:
     build: ./confirmation_service
     container_name: confirmation_service
-    ports: ["30002:8002"]
     environment:
       - RABBITMQ_HOST=rabbitmq
       - DB_HOST=confirmation_db
@@ -114,17 +161,21 @@ services:
         condition: service_healthy
       confirmation_db:
         condition: service_healthy
-    volumes: ["./confirmation_service:/app"]
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
+    volumes:
+      - ./confirmation_service:/app
 
   frontend:
     build: ./frontend
     container_name: frontend
     ports: ["30080:80"]
+    environment:
+      - PORT=80
+      - GATEWAY_URL=http://gateway:8000
+      - STORAGE_SECRET=payment-order-system-dev
+    volumes:
+      - ./frontend:/app
     depends_on:
-      - orders_service
-      - confirmation_service
-      - accounts_service
+      - gateway
 
   dozzle:
     image: amir20/dozzle:latest
@@ -135,6 +186,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
 volumes:
+  auth_db_data:
   accounts_db_data:
   orders_db_data:
   confirmation_db_data:
